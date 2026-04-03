@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GrandCheese | SYSTEM.TERMINAL</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- 引入 MD5 库用于计算邮箱哈希获取 Gravatar 通用头像 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/blueimp-md5/2.19.0/js/md5.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@300;400;700&family=VT323&display=swap');
+        
+        :root {
+            --cyan: #00ffcc;
+            --orange: #ff6600;
+            --bg-dark: #050505;
+        }
+
+        body {
+            font-family: 'VT323', monospace; 
+            background-color: var(--bg-dark);
+            color: #a0aec0;
+            overflow: hidden; 
+            cursor: crosshair;
+            font-size: 18px;
+            letter-spacing: 1px;
+        }
+
+        /* 扫描线与 CRT 闪烁 */
+        .scanlines {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%);
+            background-size: 100% 4px;
+            pointer-events: none; z-index: 50;
+        }
+        .crt-flicker {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255,255,255,0.01);
+            opacity: 0; pointer-events: none; z-index: 51;
+            animation: flicker 0.15s infinite;
+        }
+        @keyframes flicker {
+            0% { opacity: 0.02; }
+            50% { opacity: 0.05; }
+            100% { opacity: 0.02; }
+        }
+
+        #terminal-window {
+            height: 100vh;
+            width: 100vw;
+            padding: 2rem;
+            overflow-y: auto;
+            position: relative;
+            z-index: 10;
+        }
+
+        #terminal-window::-webkit-scrollbar { width: 6px; }
+        #terminal-window::-webkit-scrollbar-track { background: transparent; }
+        #terminal-window::-webkit-scrollbar-thumb { background: rgba(0, 255, 204, 0.3); }
+
+        .ascii-box {
+            border: 1px dashed #333;
+            padding: 1rem;
+            margin: 1rem 0;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(2px);
+            position: relative;
+        }
+        .ascii-box::before { content: '+'; position: absolute; top: -10px; left: -4px; color: #666; }
+        .ascii-box::after { content: '+'; position: absolute; bottom: -10px; right: -4px; color: #666; }
+
+        .img-terminal {
+            width: 100%;
+            border: 1px dashed #444; /* 改为虚线边框，保留终端感但去除黑白滤镜 */
+        }
+
+        input:focus { outline: none; }
+        .prompt-line { display: flex; align-items: center; margin-top: 1rem; padding-bottom: 2rem; }
+        
+        ::selection { background: var(--cyan); color: #000; }
+        
+        .sys-text { font-family: 'Fira Code', monospace; font-size: 14px; }
+
+        /* Pacman 游戏容器样式 */
+        #pacman-container {
+            background-color: rgba(5, 5, 5, 0.95);
+            backdrop-filter: blur(10px);
+        }
+        #pacman-canvas {
+            box-shadow: 0 0 30px rgba(0, 255, 204, 0.15);
+            border: 1px dashed var(--cyan);
+            background: #020202;
+        }
+    </style>
+</head>
+<body onclick="document.getElementById('cmd-input').focus()">
+
+    <div class="scanlines"></div>
+    <div class="crt-flicker"></div>
+    <canvas id="gol-canvas" class="fixed top-0 left-0 w-full h-full z-[-1] opacity-30 pointer-events-none"></canvas>
+
+    <!-- 监控坐标 -->
+    <div class="fixed top-4 right-4 text-xs text-cyan-500/50 z-40 pointer-events-none text-right hidden md:block">
+        [ SYS.MONITOR_ACTIVE ]<br>
+        LOC: <span id="hud-coords">X:000 Y:000</span>
+    </div>
+
+    <!-- 吃豆人游戏覆盖层 -->
+    <div id="pacman-container" class="fixed inset-0 z-[100] hidden flex flex-col items-center justify-center">
+        <div class="text-yellow-400 font-bold mb-4 animate-pulse sys-text flex items-center gap-4">
+            <span>[ WASD / ⬆⬇⬅➡ 控制移动 ]</span>
+            <span>PACMAN SYSTEM ACTIVE</span>
+            <span>[ 按下 TAB 键退出终端并关闭游戏 ]</span>
+        </div>
+        <canvas id="pacman-canvas" width="450" height="330"></canvas>
+        <div class="text-cyan-500 mt-4 font-bold text-xl" id="pacman-score">SCORE: 0</div>
+    </div>
+
+    <!-- DOOM 游戏覆盖层 (JS-DOS) 兼容模式 -->
+    <div id="doom-container" class="fixed inset-0 z-[100] hidden flex flex-col items-center justify-center bg-black/95 backdrop-blur-md">
+        <div class="text-red-500 font-bold mb-2 sys-text flex justify-between w-full max-w-5xl px-4 items-center">
+            <span class="animate-pulse">[ JS-DOS // DOSBOX CORE ]</span>
+            <div class="flex gap-4">
+                <a href="https://dos.zone/doom-dec-1993/" target="_blank" onclick="closeDoom()" class="hover:text-black hover:bg-orange-500 text-orange-500 border border-orange-500 px-4 py-1 transition-colors cursor-pointer text-sm flex items-center">
+                    [ 独立标签页运行 ]
+                </a>
+                <button onclick="closeDoom()" class="hover:text-white hover:bg-red-500 border border-red-500 px-4 py-1 transition-colors cursor-pointer">
+                    [ 终止进程 / EXIT DOOM ]
+                </button>
+            </div>
+        </div>
+        <div class="text-orange-500/70 text-xs sys-text w-full max-w-5xl px-4 mb-2 text-right">
+            > 兼容提示: 若 Zen Browser 等因安全策略拦截了内置画面，请点击上方 [独立标签页运行]
+        </div>
+        <div class="w-full max-w-5xl aspect-video border-2 border-red-500 shadow-[0_0_30px_rgba(255,0,0,0.3)] bg-black relative">
+            <iframe id="doom-iframe" class="w-full h-full relative z-10" border="0" frameborder="0" allow="autoplay; fullscreen" referrerpolicy="no-referrer"></iframe>
+        </div>
+        <div class="text-red-500 mt-4 text-sm sys-text text-center">
+            > 初始化后，请点击一下游戏画面内部以捕获键盘焦点 (Capture Keyboard Focus).<br>
+            > DOOM is running natively via WebAssembly emulator.
+        </div>
+    </div>
+
+    <!-- 终端主窗口 -->
+    <div id="terminal-window">
+        <div id="output-area"></div>
+        
+        <div id="input-area" class="prompt-line hidden">
+            <span class="text-cyan-500 font-bold mr-3">root@grandcheese:~$</span>
+            <input type="text" id="cmd-input" class="flex-1 bg-transparent border-none text-white font-bold" autocomplete="off" spellcheck="false" autofocus>
+        </div>
+    </div>
+
+    <script>
+        lucide.createIcons();
+
+        // 获取并计算邮箱的 Gravatar URL
+        const email = "aoi99905230523@gmail.com";
+        const hashedEmail = md5(email.trim().toLowerCase());
+        const avatarUrl = `https://www.gravatar.com/avatar/${hashedEmail}?s=200&d=retro`;
+
+        // 鼠标坐标追踪
+        const coordsDisplay = document.getElementById('hud-coords');
+        document.addEventListener('mousemove', (e) => {
+            if (coordsDisplay) {
+                coordsDisplay.textContent = `X:${String(e.clientX).padStart(4, '0')} Y:${String(e.clientY).padStart(4, '0')}`;
+            }
+        });
+
+        // 终端核心逻辑
+        const outputArea = document.getElementById('output-area');
+        const inputArea = document.getElementById('input-area');
+        const cmdInput = document.getElementById('cmd-input');
+        const terminalWindow = document.getElementById('terminal-window');
+
+        cmdInput.addEventListener('blur', () => {
+            if (document.getElementById('pacman-container').classList.contains('hidden')) {
+                setTimeout(() => cmdInput.focus(), 10);
+            }
+        });
+
+        function scrollToBottom() {
+            terminalWindow.scrollTop = terminalWindow.scrollHeight;
+        }
+
+        function printOutput(htmlContent) {
+            const div = document.createElement('div');
+            div.innerHTML = htmlContent;
+            outputArea.appendChild(div);
+            scrollToBottom();
+        }
+
+        // ==========================================
+        // 极客彩蛋：F12 开发者控制台隐藏信息
+        // ==========================================
+        console.log("%c[ SYSTEM_BACKDOOR_UNLOCKED ]\n> 扫描到未归档的底层执行协议...\n> 尝试在页面终端输入隐藏指令: pacman, doom, iddqd", "color: #ff6600; font-size: 14px; font-family: monospace; font-weight: bold;");
+
+        // ==========================================
+        // 模块数据
+        // ==========================================
+        const menuHTML = `
+            <div class="text-cyan-400 mb-4 mt-4">
+                > DECONSTRUCT_OS v4.2.1 启动完毕。<br>
+                > 请输入以下 <span class="text-orange-400 font-bold">编号</span> 或 <span class="text-orange-400 font-bold">指令</span> 并按回车键以查阅系统档案：<br><br>
+                <div class="pl-4 border-l border-dashed border-cyan-500/50 space-y-1 relative">
+                    [<span class="text-white">00</span>] - 个人介绍 (INIT_WHOAMI)<br>
+                    [<span class="text-white">01</span>] - GodotDemo (PROJECTS_GODOT)<br>
+                    [<span class="text-white">02</span>] - Unity个人作品 (PROJECTS_UNITY)<br>
+                    [<span class="text-white">clear</span>] - 清屏<br>
+                    [<span class="text-white">help</span>]  - 显示此菜单
+                    
+                    <!-- 光学隐形文字：与背景色极度接近，只有鼠标选中(Highlight)时才会显现 -->
+                    <div class="mt-4 text-[#0a0a0a] select-text">
+                        > HIDDEN_PROTOCOLS: pacman | doom
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const initHTML = `
+            <div class="ascii-box text-cyan-400 mt-4">
+<pre class="text-[12px] md:text-[14px] text-yellow-500 font-bold overflow-hidden select-none mb-6">
+         _.-"|
+     _.-"  o |
+ _.-"  o     |
+| "-._ o   o |
+| o   "-._   |
+|   o   o "-.|
+'-----------'
+</pre>
+                <div class="flex flex-col md:flex-row gap-6 items-start">
+                    <div class="shrink-0 p-1 border border-cyan-500/50 bg-black">
+                        <img src="${avatarUrl}" class="w-24 h-24 object-cover transition-all">
+                    </div>
+                    <div class="text-slate-300 sys-text">
+                        <span class="text-orange-500 font-bold">IDENTIFIER:</span> GrandCheese<br>
+                        <span class="text-orange-500 font-bold">EMAIL_LINK:</span> aoi99905230523@gmail.com<br>
+                        <span class="text-orange-500 font-bold">PHONE:</span> 13896082335<br>
+                        <span class="text-orange-500 font-bold">QQ:</span> 1298863044<br>
+                        <span class="text-orange-500 font-bold">GITHUB:</span> <a href="https://github.com/Aoi114514" target="_blank" class="text-cyan-400 hover:text-white underline transition-colors">https://github.com/Aoi114514</a><br>
+                        <span class="text-orange-500 font-bold">ROLE:</span> Game Developer & Designer<br>
+                        <span class="text-orange-500 font-bold">CORE_ENGINE:</span> Godot Engine 4.x, Unity<br><br>
+                        > 想要做自己喜欢的游戏
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // GodotDemo 二级菜单
+        const projectsMenuHTML = `
+            <div class="ascii-box mt-4">
+                <div class="text-white font-bold mb-2">>_ 访问路径: ./GodotDemo/</div>
+                <div class="text-cyan-400 mb-4">> 发现 2 个项目档案。请输入档案编号查阅详细资料：</div>
+                <div class="pl-4 border-l border-dashed border-cyan-500/50 space-y-3 sys-text">
+                    <div>
+                        [<span class="text-white font-bold">11</span>] - FatalWindow<br>
+                        <span class="text-slate-500">      (基于 Godot 的打破第四面墙窗口交互游戏)</span>
+                    </div>
+                    <div>
+                        [<span class="text-white font-bold">12</span>] - 倒狗模拟器<br>
+                        <span class="text-slate-500">      (基于动态经济系统的市场博弈模拟器)</span>
+                    </div>
+                </div>
+                <div class="text-orange-500 text-xs mt-4">> 提示：输入编号 11 或 12 按回车访问对应游戏，或输入 00, 02 访问其他板块。</div>
+            </div>
+        `;
+
+        // 游戏 1: FatalWindow
+        const fatalWindowHTML = `
+            <div class="ascii-box mt-4">
+                <div class="text-white font-bold mb-2">>_ FatalWindow (PROJECT_FATAL) [ACTIVE]</div>
+                <div class="text-cyan-500 text-sm mb-4">TAGS: [PLATFORMER] [GAMEJAM] [GODOT_ENGINE]</div>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 sys-text text-slate-300">
+                    <div>
+                        <!-- ⬇️ 已经替换为实际的 TapTap 游戏图片链接 -->
+                        <img src="https://img-tc.tapimg.com/market/images/e55ed236958361f437cf508bd0af34f7.png/_tap_screenshot.jpg" onerror="this.src='https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?w=600&q=80'" class="img-terminal mb-2" alt="FatalWindow">
+                        <span class="text-xs text-slate-500">MEDIA_STREAM_FATAL</span>
+                    </div>
+                    <div class="flex flex-col">
+                        <p class="mb-4">
+                            很传统的平台跳跃游戏，2025TapTap聚光灯21天挑战赛GameJam的参赛作品，做的有些粗糙，中间工作之类的各种事导致实际开发事件在两天左右，对于成品，虽然很多想要的效果没来的及实现，但操作手感上调的个人还是比较满意的~
+                        </p>
+                        <div class="mt-auto border border-dashed border-cyan-500/50 p-2 text-center text-cyan-400 hover:bg-cyan-500 hover:text-black cursor-pointer transition-colors" onclick="window.open('https://www.taptap.cn/app/780453', '_blank')">
+                            [ 执行：连接至 TapTap 数据库 (FatalWindow) ]
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // 游戏 2: 倒狗模拟器
+        const dogSimulatorHTML = `
+            <div class="ascii-box mt-4">
+                <div class="text-white font-bold mb-2">>_ 倒狗模拟器 (PROJECT_SCALPER) [ACTIVE]</div>
+                <div class="text-cyan-500 text-sm mb-4">TAGS: [SIMULATION] [GAMEJAM] [GODOT_ENGINE]</div>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 sys-text text-slate-300">
+                    <div>
+                        <img src="https://img-tc.tapimg.com/market/images/7d2f910fcaeba8277bc7cebd9d64448f.png/_tap_screenshot.jpg" onerror="this.src='https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=600&q=80'" class="img-terminal mb-2" alt="DogSimulator">
+                        <span class="text-xs text-slate-500">MEDIA_STREAM_ECONOMY</span>
+                    </div>
+                    <div class="flex flex-col">
+                        <p class="mb-4">
+                            模拟经营游戏，2025TapTap聚光灯48小时挑战赛成都场的参赛作品，第一次参加48小时的GameJam，总的来说这两天里游戏做的很开心，成品嘛……算是说的过去？
+                        </p>
+                        <div class="mt-auto border border-dashed border-cyan-500/50 p-2 text-center text-cyan-400 hover:bg-cyan-500 hover:text-black cursor-pointer transition-colors" onclick="window.open('https://www.taptap.cn/app/796920', '_blank')">
+                            [ 执行：连接至 TapTap 数据库 (倒狗模拟器) ]
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Unity 个人作品
+        const unityProjectHTML = `
+            <div class="ascii-box mt-4">
+                <div class="text-white font-bold mb-2">>_ 人工智能驱动的ACG虚拟人物模拟器 (PROJECT_AI_PET) [ARCHIVED]</div>
+                <div class="text-cyan-500 text-sm mb-4">TAGS: [AI] [LLM] [VITS] [UNITY3D]</div>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 sys-text text-slate-300">
+                    <!-- 无图状态下的纯文本数据监控面板 -->
+                    <div class="border border-dashed border-slate-700 bg-black p-4 flex flex-col justify-center">
+                        <div class="text-orange-500 font-bold mb-2">[ DATA_STREAM_MISSING ]</div>
+                        <div class="text-slate-500 text-xs space-y-1">
+                            > CONNECTING TO CHATGPT API... <span class="text-cyan-400">ESTABLISHED</span><br>
+                            > LOCAL VITS MODULE... <span class="text-cyan-400">READY</span><br>
+                            > BAIDU ASR SERVICE... <span class="text-cyan-400">ONLINE</span><br>
+                            > PARSING EMOTION TAGS... <span class="text-cyan-400">SUCCESS</span><br>
+                            <br>
+                            <span class="text-red-500 animate-pulse">> ERROR: SOURCE_CODE_NOT_FOUND</span><br>
+                            <span class="text-red-500">> SYSTEM REINSTALL OVERWROTE DATA</span>
+                        </div>
+                    </div>
+                    <div class="flex flex-col">
+                        <p class="mb-4">
+                            大学的毕业设计，用Unity做了一个接入ChatGPT的虚拟宠物。<br><br>
+                            语音合成使用的本地部署的vits，语音识别调用的百度的语音识别服务。通过提示词来让AI输出的文本里面带有这句话需要的动作、语气标注，发送给vits的文本会自动去掉这些标注。<br><br>
+                            <span class="text-red-400">> 异常日志记录：后面电脑重装系统的时候把源码搞丢了，悔恨。</span>
+                        </p>
+                        <div class="mt-auto border border-dashed border-orange-500/50 p-2 text-center text-orange-400 hover:bg-orange-500 hover:text-black cursor-pointer transition-colors" onclick="window.open('https://docs.qq.com/aio/DRmhkYmpjSGRmZ3FU', '_blank')">
+                            [ 执行：访问腾讯文档遗留档案 ]
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // ==========================================
+        // 指令解析引擎
+        // ==========================================
+        cmdInput.addEventListener('keydown', function(e) {
+            // 如果在终端界面按下 Tab 键，阻止默认失焦行为
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                return;
+            }
+
+            if (e.key === 'Enter') {
+                const cmd = this.value.trim().toLowerCase();
+                this.value = ''; 
+                
+                printOutput(`<div class="mt-4 mb-2"><span class="text-cyan-500 font-bold">root@grandcheese:~$</span> <span class="text-white">${cmd}</span></div>`);
+                if (cmd === '') return;
+
+                switch(cmd) {
+                    case 'help': case 'ls': case 'menu':
+                        printOutput(menuHTML); break;
+                    case '0': case '00': case 'init':
+                        printOutput(initHTML); break;
+                    case '1': case '01': case 'godot': case 'godotdemo':
+                        printOutput(projectsMenuHTML); break;
+                    case '11': case 'fatalwindow':
+                        printOutput(fatalWindowHTML); break;
+                    case '12': case 'dogsimulator': case 'scalper':
+                        printOutput(dogSimulatorHTML); break;
+                    case '2': case '02': case 'unity':
+                        printOutput(unityProjectHTML); break;
+                    // 隐藏彩蛋入口保持不变，从主菜单中移除了说明
+                    case 'pacman': case 'play': case 'game':
+                        startPacman(); 
+                        printOutput(`<div class="text-yellow-400">> PACMAN OS 初始化中... [请在游戏界面按下 TAB 键退出]</div>`); 
+                        break;
+                    case 'doom': case 'iddqd': case 'idkfa':
+                        startDoom();
+                        printOutput(`<div class="text-red-500 font-bold">> JS-DOS DOSBOX 初始化中... 正在挂载 DOOM.WAD [请使用顶部的 EXIT 按钮退出进程]</div>`);
+                        break;
+                    case 'clear': case 'cls':
+                        outputArea.innerHTML = ''; break;
+                    default:
+                        printOutput(`<div class="text-red-500">bash: ${cmd}: command not found. (输入 'help' 获取可用指令列表)</div>`);
+                }
+            }
+        });
+
+        // ==========================================
+        // DOOM 引擎集成 (基于 JS-DOS)
+        // ==========================================
+        function startDoom() {
+            const doomContainer = document.getElementById('doom-container');
+            const doomIframe = document.getElementById('doom-iframe');
+            
+            // 使用指定的 Doom 源链接
+            doomIframe.src = "https://dos.zone/doom-dec-1993/";
+            doomContainer.classList.remove('hidden');
+        }
+
+        function closeDoom() {
+            const doomContainer = document.getElementById('doom-container');
+            const doomIframe = document.getElementById('doom-iframe');
+            
+            // 清空 iframe 的 src 即可瞬间销毁内存中的 WebAssembly 实例并停止所有音频
+            doomIframe.src = ""; 
+            doomContainer.classList.add('hidden');
+            
+            // 夺回控制台焦点
+            cmdInput.focus();
+            printOutput(`<div class="text-orange-500">> SYSTEM: DOOM 进程已安全终止，底层内存已释放。</div>`);
+        }
+
+        // 系统引导动画 (藏入挂载日志彩蛋)
+        const bootLog = [
+            "Mounting System Architecture... [OK]",
+            "Fetching Identity from Gravatar via Hash... [OK]",
+            "Caching [pacman.sys] & [doom.wad] to stealth memory... [HIDDEN]",
+            "Connecting Unity & Godot Environment... [OK]",
+            "System boot sequence complete."
+        ];
+
+        async function systemBoot() {
+            for (let i = 0; i < bootLog.length; i++) {
+                await new Promise(r => setTimeout(r, Math.random() * 200 + 100));
+                let colorClass = bootLog[i].includes("[OK]") ? "text-cyan-400" : "text-slate-400";
+                printOutput(`<div class="${colorClass} sys-text">> ${bootLog[i]}</div>`);
+            }
+            await new Promise(r => setTimeout(r, 400));
+            printOutput(initHTML); 
+            await new Promise(r => setTimeout(r, 600)); 
+            printOutput(menuHTML);
+            inputArea.classList.remove('hidden'); 
+            cmdInput.focus();
+            scrollToBottom();
+        }
+        systemBoot();
+
+        // ==============================================================
+        // 游戏引擎 1: 背景字符矩阵 (Game of Life)
+        // ==============================================================
+        const golCanvas = document.getElementById('gol-canvas');
+        const golCtx = golCanvas.getContext('2d');
+        const res = 16; 
+        let cols, rows, grid, isDrawing = false;
+
+        function initMatrix() {
+            golCanvas.width = window.innerWidth;
+            golCanvas.height = window.innerHeight;
+            cols = Math.floor(golCanvas.width / res);
+            rows = Math.floor(golCanvas.height / res);
+            grid = new Array(cols).fill(null).map(() => new Array(rows).fill(0));
+            for (let i = 0; i < cols; i++) {
+                for (let j = 0; j < rows; j++) {
+                    grid[i][j] = Math.random() > 0.85 ? 1 : 0;
+                }
+            }
+            golCtx.font = `${res}px 'VT323', monospace`;
+        }
+        window.addEventListener('resize', initMatrix);
+
+        window.addEventListener('mousedown', () => isDrawing = true);
+        window.addEventListener('mouseup', () => isDrawing = false);
+        window.addEventListener('mousemove', (e) => {
+            if (isDrawing) {
+                const col = Math.floor(e.clientX / res), row = Math.floor(e.clientY / res);
+                if (col >= 0 && col < cols && row >= 0 && row < rows) grid[col][row] = 1;
+            }
+        });
+
+        function updateMatrix() {
+            const nextGrid = grid.map(arr => [...arr]);
+            for (let c = 0; c < cols; c++) {
+                for (let r = 0; r < rows; r++) {
+                    let neighbors = 0;
+                    for (let i = -1; i < 2; i++) {
+                        for (let j = -1; j < 2; j++) {
+                            if (i === 0 && j === 0) continue;
+                            const x = c + i, y = r + j;
+                            if (x >= 0 && y >= 0 && x < cols && y < rows) neighbors += grid[x][y];
+                        }
+                    }
+                    if (grid[c][r] === 1 && (neighbors < 2 || neighbors > 3)) nextGrid[c][r] = 0;
+                    else if (grid[c][r] === 0 && neighbors === 3) nextGrid[c][r] = 1;
+                }
+            }
+            grid = nextGrid;
+        }
+
+        let matrixLastTime = 0;
+        function renderMatrix(time) {
+            requestAnimationFrame(renderMatrix);
+            if (time - matrixLastTime > 1000 / 10) { 
+                matrixLastTime = time;
+                updateMatrix();
+                
+                golCtx.fillStyle = 'rgba(0, 0, 0, 0.4)'; 
+                golCtx.fillRect(0, 0, golCanvas.width, golCanvas.height);
+                golCtx.textAlign = 'center';
+                golCtx.textBaseline = 'middle';
+
+                for (let c = 0; c < cols; c++) {
+                    for (let r = 0; r < rows; r++) {
+                        if (grid[c][r] === 1) {
+                            golCtx.fillStyle = (c + r) % 13 === 0 ? 'rgba(255, 102, 0, 0.8)' : 'rgba(0, 255, 204, 0.6)';
+                            golCtx.fillText('1', c * res + res/2, r * res + res/2);
+                        } else if(Math.random() > 0.98) {
+                            golCtx.fillStyle = 'rgba(0, 255, 204, 0.1)';
+                            golCtx.fillText('0', c * res + res/2, r * res + res/2);
+                        }
+                    }
+                }
+            }
+        }
+        initMatrix();
+        requestAnimationFrame(renderMatrix);
+
+        // ==============================================================
+        // 游戏引擎 2: 终端版迷你吃豆人 (Pacman Easter Egg)
+        // ==============================================================
+        const pacContainer = document.getElementById('pacman-container');
+        const pacCanvas = document.getElementById('pacman-canvas');
+        const pacCtx = pacCanvas.getContext('2d');
+        const scoreEl = document.getElementById('pacman-score');
+        
+        // --- 8-bit 音效合成器 (Web Audio API) ---
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        let audioCtx;
+
+        function playRetroSound(type) {
+            if (!audioCtx) return;
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            
+            const osc = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            osc.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            const now = audioCtx.currentTime;
+            
+            if (type === 'eat') {
+                // 吃豆子：短促的矩形波高音 Blip
+                osc.type = 'square';
+                osc.frequency.setValueAtTime(600, now);
+                osc.frequency.exponentialRampToValueAtTime(1200, now + 0.05);
+                gainNode.gain.setValueAtTime(0.05, now);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+                osc.start(now);
+                osc.stop(now + 0.05);
+            } else if (type === 'death') {
+                // 死亡：锯齿波频率骤降 (Downsweep)
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(300, now);
+                osc.frequency.exponentialRampToValueAtTime(20, now + 0.5);
+                gainNode.gain.setValueAtTime(0.1, now);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+                osc.start(now);
+                osc.stop(now + 0.5);
+            }
+        }
+
+        const tileSize = 30;
+        let isPacmanRunning = false;
+        let pacScore = 0;
+        
+        // 1: 墙, 2: 豆子, 0: 空地
+        const mapBlueprint = [
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            [1,2,2,2,2,2,2,1,2,2,2,2,2,2,1],
+            [1,2,1,1,2,1,2,1,2,1,2,1,1,2,1],
+            [1,2,2,2,2,1,2,2,2,1,2,2,2,2,1],
+            [1,1,1,1,2,1,1,1,1,1,2,1,1,1,1],
+            [1,2,2,2,2,2,2,2,2,2,2,2,2,2,1],
+            [1,2,1,1,2,1,1,1,1,1,2,1,1,2,1],
+            [1,2,2,2,2,2,2,1,2,2,2,2,2,2,1],
+            [1,2,1,1,1,1,2,1,2,1,1,1,1,2,1],
+            [1,2,2,2,2,2,2,2,2,2,2,2,2,2,1],
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+        ];
+        let pacMap = [];
+        
+        let pacman = { x: 1, y: 1, dx: 0, dy: 0, nextDx: 0, nextDy: 0 };
+        let ghost = { x: 13, y: 9, dx: -1, dy: 0 };
+
+        function initPacman() {
+            pacMap = mapBlueprint.map(row => [...row]);
+            pacman = { x: 1, y: 1, dx: 0, dy: 0, nextDx: 0, nextDy: 0 };
+            ghost = { x: 13, y: 9, dx: -1, dy: 0 };
+            pacScore = 0;
+            scoreEl.textContent = "SCORE: " + pacScore;
+        }
+
+        // 监听全局 Tab 键退出
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Tab' && isPacmanRunning) {
+                e.preventDefault();
+                closePacman();
+            }
+        });
+
+        // 监听吃豆人方向控制
+        document.addEventListener('keydown', (e) => {
+            if (!isPacmanRunning) return;
+            switch(e.key) {
+                case 'ArrowUp': case 'w': pacman.nextDx = 0; pacman.nextDy = -1; break;
+                case 'ArrowDown': case 's': pacman.nextDx = 0; pacman.nextDy = 1; break;
+                case 'ArrowLeft': case 'a': pacman.nextDx = -1; pacman.nextDy = 0; break;
+                case 'ArrowRight': case 'd': pacman.nextDx = 1; pacman.nextDy = 0; break;
+            }
+        });
+
+        function startPacman() {
+            if (!audioCtx) audioCtx = new AudioContext(); // 初始化音频上下文
+            pacContainer.classList.remove('hidden');
+            isPacmanRunning = true;
+            initPacman();
+        }
+
+        function closePacman() {
+            pacContainer.classList.add('hidden');
+            isPacmanRunning = false;
+            cmdInput.focus();
+            printOutput(`<div class="text-orange-500">> SYSTEM: 游戏进程已手动终止。得分: ${pacScore}</div>`);
+        }
+
+        let pacLastTime = 0;
+        const pacSpeed = 150; // 控制移动速度 (150ms 走一格)
+
+        function loopPacman(time) {
+            requestAnimationFrame(loopPacman);
+            if (!isPacmanRunning) return;
+
+            if (time - pacLastTime > pacSpeed) {
+                pacLastTime = time;
+                
+                // 吃豆人移动逻辑：如果下一步可以走，则转向
+                if (pacMap[pacman.y + pacman.nextDy][pacman.x + pacman.nextDx] !== 1) {
+                    pacman.dx = pacman.nextDx;
+                    pacman.dy = pacman.nextDy;
+                }
+                // 碰撞检测与移动
+                if (pacMap[pacman.y + pacman.dy][pacman.x + pacman.dx] !== 1) {
+                    pacman.x += pacman.dx;
+                    pacman.y += pacman.dy;
+                }
+
+                // 吃豆子
+                if (pacMap[pacman.y][pacman.x] === 2) {
+                    pacMap[pacman.y][pacman.x] = 0;
+                    pacScore += 10;
+                    scoreEl.textContent = "SCORE: " + pacScore;
+                    playRetroSound('eat'); // 播放吃豆子音效
+                }
+
+                // 简单的幽灵随机移动 (避开墙壁)
+                const dirs = [{x:0, y:-1}, {x:0, y:1}, {x:-1, y:0}, {x:1, y:0}];
+                let validDirs = dirs.filter(d => pacMap[ghost.y + d.y][ghost.x + d.x] !== 1);
+                // 尽量不走回头路
+                let forwardDirs = validDirs.filter(d => !(d.x === -ghost.dx && d.y === -ghost.dy));
+                if (forwardDirs.length === 0) forwardDirs = validDirs; // 进了死胡同就回头
+                if (forwardDirs.length > 0) {
+                    let move = forwardDirs[Math.floor(Math.random() * forwardDirs.length)];
+                    ghost.dx = move.x; ghost.dy = move.y;
+                    ghost.x += ghost.dx; ghost.y += ghost.dy;
+                }
+
+                // 相撞检测 (被幽灵吃掉)
+                if (pacman.x === ghost.x && pacman.y === ghost.y) {
+                    playRetroSound('death'); // 播放死亡音效
+                    isPacmanRunning = false; // 暂停游戏逻辑
+                    
+                    // 屏幕抖动效果
+                    pacCanvas.style.transform = "translate(5px, 5px)";
+                    setTimeout(() => pacCanvas.style.transform = "translate(-5px, -5px)", 50);
+                    setTimeout(() => pacCanvas.style.transform = "translate(0, 0)", 100);
+
+                    // 短暂延迟后重置
+                    setTimeout(() => {
+                        if (!pacContainer.classList.contains('hidden')) {
+                            initPacman();
+                            isPacmanRunning = true;
+                        }
+                    }, 800);
+                }
+            }
+
+            drawPacman();
+        }
+
+        function drawPacman() {
+            pacCtx.fillStyle = '#020202'; // 极黑背景
+            pacCtx.fillRect(0, 0, pacCanvas.width, pacCanvas.height);
+
+            // 画地图 (线框终端风)
+            for (let y = 0; y < pacMap.length; y++) {
+                for (let x = 0; x < pacMap[y].length; x++) {
+                    if (pacMap[y][x] === 1) {
+                        // 发光双层青色墙壁
+                        pacCtx.strokeStyle = 'rgba(0, 255, 204, 0.7)';
+                        pacCtx.shadowColor = 'rgba(0, 255, 204, 0.5)';
+                        pacCtx.shadowBlur = 8;
+                        pacCtx.lineWidth = 1;
+                        pacCtx.strokeRect(x * tileSize + 4, y * tileSize + 4, tileSize - 8, tileSize - 8);
+                        pacCtx.strokeRect(x * tileSize + 10, y * tileSize + 10, tileSize - 20, tileSize - 20); // 内层框
+                        pacCtx.shadowBlur = 0; // 重置阴影
+                    } else if (pacMap[y][x] === 2) {
+                        // 数据碎片(豆子)
+                        pacCtx.fillStyle = 'rgba(0, 255, 204, 0.8)';
+                        pacCtx.shadowColor = 'rgba(0, 255, 204, 0.8)';
+                        pacCtx.shadowBlur = 5;
+                        pacCtx.fillRect(x * tileSize + tileSize/2 - 2, y * tileSize + tileSize/2 - 2, 4, 4);
+                        pacCtx.shadowBlur = 0;
+                    }
+                }
+            }
+
+            // 画吃豆人 (黄色发光线框)
+            pacCtx.strokeStyle = '#ffcc00';
+            pacCtx.shadowColor = '#ffcc00';
+            pacCtx.shadowBlur = 10;
+            pacCtx.lineWidth = 2;
+            pacCtx.beginPath();
+            let mouthOffset = (Date.now() % 400 < 200) ? 0.2 : 0; 
+            let angle = 0;
+            if (pacman.dx === 1) angle = 0;
+            else if (pacman.dx === -1) angle = Math.PI;
+            else if (pacman.dy === 1) angle = Math.PI/2;
+            else if (pacman.dy === -1) angle = -Math.PI/2;
+            
+            pacCtx.arc(pacman.x * tileSize + tileSize/2, pacman.y * tileSize + tileSize/2, tileSize/2 - 6, angle + mouthOffset * Math.PI, angle + (2 - mouthOffset) * Math.PI);
+            pacCtx.lineTo(pacman.x * tileSize + tileSize/2, pacman.y * tileSize + tileSize/2);
+            pacCtx.closePath();
+            pacCtx.stroke(); // 仅描边，不填充
+            pacCtx.shadowBlur = 0;
+
+            // 画幽灵 (警告标识符形态：几何多边形)
+            pacCtx.strokeStyle = '#ff6600';
+            pacCtx.shadowColor = '#ff6600';
+            pacCtx.shadowBlur = 15;
+            pacCtx.lineWidth = 2;
+            let gx = ghost.x * tileSize + tileSize/2;
+            let gy = ghost.y * tileSize + tileSize/2;
+            
+            // 外框三角形
+            pacCtx.beginPath();
+            pacCtx.moveTo(gx, gy - 8);
+            pacCtx.lineTo(gx + 8, gy + 8);
+            pacCtx.lineTo(gx - 8, gy + 8);
+            pacCtx.closePath();
+            pacCtx.stroke();
+            
+            // 内部 X 符号 (警示意味)
+            pacCtx.beginPath();
+            pacCtx.moveTo(gx - 4, gy + 2);
+            pacCtx.lineTo(gx + 4, gy + 8);
+            pacCtx.moveTo(gx + 4, gy + 2);
+            pacCtx.lineTo(gx - 4, gy + 8);
+            pacCtx.stroke();
+            pacCtx.shadowBlur = 0;
+        }
+
+        requestAnimationFrame(loopPacman);
+
+    </script>
+</body>
+</html>
